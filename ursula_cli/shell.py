@@ -18,8 +18,10 @@
 import argparse
 import logging
 import os
+import shutil
 import subprocess
 import sys
+import time
 import yaml
 
 LOG = logging.getLogger(__name__)
@@ -104,9 +106,8 @@ def _run_ansible(inventory, playbook, user='root', module_path='./library',
     return proc.returncode
 
 
-def _vagrant_ssh_config(environment, boxes):
-    ssh_config_file = ".vagrant/%s.ssh" % os.path.basename(environment)
-    f = open(ssh_config_file, 'w')
+def _create_vagrant_ssh_config(environment, boxes):
+    output = ""
     for box in boxes:
         command = [
           'vagrant',
@@ -119,33 +120,38 @@ def _vagrant_ssh_config(environment, boxes):
                                 stderr=subprocess.STDOUT)
 
         for line in iter(proc.stdout.readline, b''):
-            f.write("%s\n" % line.rstrip())
+            output += "%s\n" % line.rstrip()
 
         if proc.returncode:
-            raise Exception("Failed to write SSH config to %s"
-                            % (ssh_config_file))
+            raise Exception("Failed to create SSH config")
             return proc.returncode
 
+    return output
+
+def _vagrant_ssh_config(environment,boxes):
+    ssh_config = _create_vagrant_ssh_config(environment, boxes)
+    while ssh_config[:4] != "Host":
+        time.sleep(5)
+        ssh_config = _create_vagrant_ssh_config(environment, boxes)
+
+    ssh_config_file = ".vagrant/%s.ssh" % os.path.basename(environment)
+    f = open(ssh_config_file, 'w')
+    f.write(ssh_config)
     f.close()
     _append_envvar("ANSIBLE_SSH_ARGS", "-F %s" % ssh_config_file)
 
-    return 0
-
-
 def _run_vagrant(environment):
-    vagrant_config_file = "%s/vagrant.yml" % environment
+    vagrant_config_file = os.path.join(environment, 'vagrant.yml')
 
     if os.path.isfile(vagrant_config_file):
         _set_envvar("SETTINGS_FILE", vagrant_config_file)
         vagrant_config = yaml.load(open(vagrant_config_file, 'r'))
+        shutil.copy(vagrant_config_file,
+                    os.path.join(".vagrant/vagrant.yml"))
     else:
         vagrant_config = yaml.load(open('vagrant.yml', 'r'))
 
     vms = vagrant_config['vms'].keys()
-
-    rc = _vagrant_ssh_config(environment, vms)
-    if rc:
-        return rc
 
     command = [
         'vagrant',
@@ -167,6 +173,9 @@ def _run_vagrant(environment):
                         % " ".join(command), os.environ)
         return proc.returncode
     else:
+        rc = _vagrant_ssh_config(environment, vms)
+        if rc:
+            return rc
         print "**************************************************"
         print "Ursula <3 Vagrant"
         print "To interact with your environment via Vagrant set:"
@@ -204,6 +213,7 @@ def run(args, extra_args):
         extra_args += ['--syntax-check', '--list-tasks']
 
     if args.vagrant:
+        extra_args += ['-s', '-u', 'vagrant']
         rc = _run_vagrant(environment=args.environment)
         if rc:
             return rc
